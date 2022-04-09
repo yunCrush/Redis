@@ -1,7 +1,7 @@
 package com.yun.redis.entities;
 
-import java.util.Date;
 import javax.persistence.*;
+import java.util.Date;
 
 @Table(name = "t_user")
 public class User {

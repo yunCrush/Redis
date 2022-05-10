@@ -120,7 +120,237 @@ redis单线程是指网络的IO与键值的读写是一个线程执行的读取s
       ![日活统计](./images/bitmap-year.jpg)  
       **需求**: 钉钉签到，某部电影是否被某个人点赞过，用户是否登录过app,连续签到等等。
             
-    - 3.7 hyperloglog
-    -3.8 GEO
+    - 3.7 hyperloglog(基数统计)   
+        为什么slot是16384?    
+        实质String   
+        uv: Unique Visitor,客户端IP,需要去重     
+        pv: PageView 页面访问量   
+        DAU: daily active user 日活跃(去重复登录的用户)    
+        MAU: monthly active user 月活跃   
+        ```$xslt
+        pfadd taobao:uv1 111 112 113
+        pfadd taobao:uv2 111 112  114 115
+        pfcount taobao:uv1   ==> 3
+        pfmerge result taobao:uv1 taobao:uv2
+        pfcount result       ==> 5
+        ```    
+      - 1.需求   
+          　　a.用户搜索的关键词的数量; b.统计用户每天搜索不同词条个数   
+          　　bitmap不适合亿级数据量,但是是精确的,hyperloglog误差0.81%
+      - 2.实战   
+        　　天猫首页亿级UV统计方案:   
+        　　淘宝、天猫首页的UV，平均每天是1~1.5个亿左右,每天存1.5个亿的IP，访问者来了后先去查是否存在，不存在加入   
+        **方案1: redis hash**   
+        　　redis——hash = <keyDay,<ip,1>>   
+        　　按照ipv4的结构来说明，每个ipv4的地址最多是15个字节(ip = "192.168.111.1"，最多xxx.xxx.xxx.xxx)   
+        　　某一天的1.5亿 * 15个字节= 2G，一个月60G，redis死定了。o(╥﹏╥)o   
+    - 3.8 GEO   
+        　　地球上的地理位置是使用二维的经纬度表示，经度范围 (-180, 180]，纬度范围 (-90, 90]，只要我们确定一个点的经纬度就可以名曲他在地球的位置。
+        例如滴滴打车，最直观的操作就是实时记录更新各个车的位置，实质Zset   
+        
+      - 1.命令   
+        ```aidl
+        添加经纬度
+        GEOADD city 116.403963 39.915119 "天安门" 116.403414 39.924091 "故宫" 116.024067 40.362639 "长城"
+        获取经纬度
+        GEOPOS city 天安门 故宫
+        获取对应hash值
+        GEOHASH city 天安门
+        获取距离
+        GEODIST city 天安门 故宫 m
+        GEORADIUS 以半径查找
+        ``` 
+        ```aidl
+        georadius 以给定的经纬度为中心， 返回键包含的位置元素当中， 与中心的距离不超过给定最大距离的所有位置元素。   
+        GEORADIUS city 116.418017 39.914402 10 km withdist withcoord count 10 withhash desc
+        116.418017 39.914402 自己经纬度
+        
+        WITHDIST: 在返回位置元素的同时， 将位置元素与中心之间的距离也一并返回。 距离的单位和用户给定的范围单位保持一致。
+        WITHCOORD: 将位置元素的经度和维度也一并返回。
+        WITHHASH: 以 52 位有符号整数的形式， 返回位置元素经过原始 geohash 编码的有序集合分值。 这个选项主要用于底层应用或者调试， 实际中的作用并不大
+        COUNT 限定返回的记录数。
+        ```
+      - 2.实战   
+      　美团地图位置附近的酒店推送     
+      　摇一个妹纸，共享单车
+4. 布隆过滤器   
+    　　它实际上是一个很长的二进制数组+一系列随机hash算法映射函数，主要用于判断一个元素是否在集合中。
+    现有50亿个电话号码，现有10万个电话号码，如何要快速准确的判断这些电话号码是否已经存在    
+    **解决缓存穿透问题**   
+    　　返回存在就不一定存在(因为hash冲突导致的)，返回不存在就一定不存在，布隆过滤器可以添加元素，不可以删除元素会增加误判。**添加元素时，把某个位置置为1**
+   
+      布隆过滤器3步骤：初始化，添加，判断是否存在   
+      　**1.初始化:** 布隆过滤器 本质上 是由长度为 m 的位向量或位列表（仅包含 0 或 1 位值的列表）组成，最初所有的值均设置为 0   
+      　**2.添加:** 当我们向布隆过滤器中添加数据时，为了尽量地址不冲突，会使用多个 hash 函数对 key 进行运算，算得一个下标索引值，然后对位数组长度进行取模运算得到一个位置，每个 hash 函数都会算得一个不同的位置。再把位数组的这几个位置都置为 1 就完成了 add 操作。   
+      　**3.判断是否存在:** 向布隆过滤器查询某个key是否存在时，先把这个 key 通过相同的多个 hash 函数进行运算，查看对应的位置是否都为 1，
+                  只要有一个位为 0，那么说明布隆过滤器中这个 key 不存在；
+                  如果这几个位置全都是 1，那么说明极有可能存在；
+                  因为这些位置的 1 可能是因为其他的 key 存在导致的，也就是前面说过的hash冲突   
+       **为什么不可删除：** 因为每个位置是共同使用过的，如果删除了对其他的key有误判，其他key,存在，但是已经被置为0了 
+       **优点：** 高效插入和查询，占用空间少   
+       **缺点：** 不可删除，会造成误判   
+       google guava：默认0.03误判率，100W个数，占用950W bit位，5个hash函数。**仅单机**
+       **白名单架构**   
+       ![白名单架构](./images/whitelist.jpg)    
+       **布隆过滤器** 
+       ![布隆过滤器](./images/boolm.jpg)   
+       **黑名单使用** 
+       ![黑名单使用](./images/blacklist.jpg)
+5. 缓存击穿-缓存雪崩-缓存穿透
+    - 1.缓存击穿：热key突然失效，暴打Mysql     
+      　a.访问频繁key,不设置过期时间   
+      　b.互斥更新，差异失效时间   
+      　c.互斥独占锁防止击穿
+    - 2.缓存雪崩：大量可以失效    
+    　 a. 限流、降级、redis集群
+    - 3.缓存穿透：redis和mysql都没有  
+        　a.空对象缓存或者缺省值   
+        　b.Guava缓存google布隆过滤器    
+        　c. redisson布隆过滤器   
+    **聚划算高并发解决缓存击穿**   
+     　7*24高并发，实时。分层类别，需求排期，每个时间段，展示不同商品    
+        ```aidl
+        1.100%高并发，绝对不可以用mysql实现
+        2.先把mysql里面参加活动的数据抽取进redis，一般采用定时器扫描来决定上线活动还是下线取消。
+        3.支持分页功能，一页20条记录
+        redis里面什么样子的数据类型支持上述功能？
+        ```
+      解决方案：
+            ![布隆过滤器](./images/redis-cache.jpg)
+6. 分布式锁    
+    ````$xslt
+    Redis除了拿来做缓存，你还见过基于Redis的什么用法？ ==>分布式锁
+    Redis 做分布式锁的时候有需要注意的问题？ ==>分布式锁续期
+    如果是 Redis 是单点部署的，会带来什么问题？如何解决  ==>宕机
+    集群模式下，比如主从模式，有没有什么问题呢？ ==>异步复制一主二从，master down，丢失lock
+    你知道 Redis 是怎么解决集群模式也不靠谱的问题的吗？  ==> 多master
+    ````
 
-      
+    - 1.分布式锁的条件和刚需
+        - a.独占性: OnlyOne，任何时刻只能有且仅有一个线程持有
+        - b.高可用: 若redis集群环境下，不能因为某一个节点挂了而出现获取锁和释放锁失败的情况
+        - c.仿死锁: 杜绝死锁，必须有超时控制机制或者撤销操作，有个兜底终止跳出方案
+        - d.不乱抢: 防止张冠李戴，不能私下unlock别人的锁，只能自己加锁自己释放。
+        - e.重入性: 同一个节点的同一个线程如果获得锁之后，它也可以再次获取这个锁。    
+    - 2.单机Redis单节点实现分布式锁常见问题    
+        - a.超卖：synchronized  lock 加锁  
+            ```$xslt
+            synchronized (this) {
+                // todo
+                }
+            ```
+        - b.nginx分布式微服务架构: 加锁只是针对本地单机层面，仍旧出现超卖，需要redis分布式锁
+            ```$xslt
+              String key = "zzyyRedisLock";
+              String value = UUID.randomUUID().toString()+Thread.currentThread().getName();
+              Boolean flagLock = stringRedisTemplate.opsForValue().setIfAbsent(key, value);
+            ```
+        - c.finally必须关闭锁资源:出异常的话，可能无法释放锁，必须要在代码层面finally释放锁
+            ```$xslt
+            try {
+                Boolean flagLock = stringRedisTemplate.opsForValue().setIfAbsent(key, value);
+               } finally {
+                stringRedisTemplate.delete(key);     
+                } 
+            ```
+        - d.宕机：部署了微服务jar包的机器挂了，代码层面根本没有走到finally这块，没办法保证解锁，这个key没有被删除，需要加入一个过期时间限定key
+            ```$xslt
+            Boolean flagLock = stringRedisTemplate.opsForValue().setIfAbsent(key, value);
+            stringRedisTemplate.expire(key,10L,TimeUnit.SECONDS);    
+            ```
+        - e.原子性问题：设置key+过期时间分开了，必须要合并成一行具备原子性
+            ```$xslt
+            Boolean flagLock = stringRedisTemplate.opsForValue().setIfAbsent(key,value,10L,TimeUnit.SECONDS);
+            ```
+        - f.误删问题：删除别人的锁，通过value值判断当前是否是自己拥有的锁
+             ```$xslt
+             finally {
+                 if (stringRedisTemplate.opsForValue().get(key).equals(value)) {
+                     stringRedisTemplate.delete(key);
+                 }
+             }
+             ```
+        - g.原子性问题: finally块的判断+del删除操作不是原子性的
+            ```$xslt
+            // 使用Lua脚本
+           finally {
+                      Jedis jedis = RedisUtils.getJedis();
+                      String script = "if redis.call('get', KEYS[1]) == ARGV[1] " +
+                              "then " +
+                              "return redis.call('del', KEYS[1]) " +
+                              "else " +
+                              "   return 0 " +
+                              "end";
+                      try {
+                          Object result = jedis.eval(script, Collections.singletonList(REDIS_LOCK_KEY), Collections.singletonList(value));
+                          if ("1".equals(result.toString())) {
+                              System.out.println("------del REDIS_LOCK_KEY success");
+                          }else{
+                              System.out.println("------del REDIS_LOCK_KEY error");
+                          }
+                      } finally {
+                          if(null != jedis) {
+                              jedis.close();
+                          }
+                      }
+                  }
+            ```
+        - h.时间过期：确保redisLock过期时间大于业务执行时间的问题
+            ```$xslt
+            // 单机版redis，结束
+            ```        
+    - 3.Redis集群实现分布式锁:RedLock之Redisson
+            　　redlock是一种使用redis实现分布式锁的算法 http://redis.cn/topics/distlock.html    
+          　　  redis单机：CP     
+           　　 redis集群：AP  redis异步复制造成的锁丢失，比如：主节点没来的及把刚刚set进来这条数据给从节点，就挂了。  
+          　　  zookeeper+集群：CP zk重启或者网络故障都会导致集群重新选主，此间client不可注册到zk，所以在大型分布式系统中都很少选用zk.     
+                **Redis只支持AP，为了解决CP问题采用多master模式，不是主从或者集群模式**     
+                **问题：** 分布式系统受系统时钟影响，如果线程 1 从 3 个实例获取到了锁。但是这 3 个实例中的某个实例的系统时间走的稍微快一点，则它持有的锁会提前过期被释放，当他释放后，此时又有 3 个实例是空闲的，则线程2也可以获取到锁，则可能出现两个线程同时持有锁了。    
+        - 1.Redisson源码
+            ```aidl
+            this.lockWatchdogTimeout = 30000L;
+            ```
+7. Redis的缓存过期淘汰策略    
+    - 1.数据如何删除的
+         - a.立即删除: 到达过期时间，立即删除。对CPU不友好，用处理器性能换取存储空间 （拿时间换空间)
+         - b.惰性删除：到达过期时间不做处理，等到下次访问时，判断是否过期，过期则删除，返回null。对内存不友好，如果一个键，过期一直不被访问则一直存在内存中，对redis不友好。
+         - c.定期删除：随机抽取，存在漏网之鱼
+    - 2.缓存淘汰策略    
+        　　由于三种删除策略存在漏洞，诞生了缓存淘汰策略。
+         - a.8种缓存淘汰策略(2个维度*4个方面)
+           ```aidl
+           noeviction: 不会驱逐任何key
+           allkeys-lru: 对所有key使用LRU算法进行删除
+           volatile-lru: 对所有设置了过期时间的key使用LRU算法进行删除
+           allkeys-random: 对所有key随机删除
+           volatile-random: 对所有设置了过期时间的key随机删除
+           volatile-ttl: 删除马上要过期的key
+           allkeys-lfu: 对所有key使用LFU算法进行删除
+           volatile-lfu: 对所有设置了过期时间的key使用LFU算法进行删除 
+           ```
+         - b.2个维度
+         ```aidl
+          1、过期键中筛选
+          2、所有键中筛选
+         ```  
+         - c.4个方面
+        ```aidl
+        LRU 
+        LFU 
+        TTL 过期时间
+        Random 随机
+        ```
+8. 经典5种数据类型实现
+    ```aidl
+    1. 单线程如何理解，为什么这样设计？
+    2. redis跳跃列表，有什么缺点？
+    ```
+![redis底层编码实现关系](./images/redisobject.jpg)     
+   - 1.跳表：链表+多级索引  
+        ```aidl
+        优缺点：
+        1、跳表是一个最典型的空间换时间解决方案，而且只有在数据量较大的情况下才能体现出来优势。而且应该是读多写少的情况下才能使用，所以它的适用范围应该还是比较有限的
+        2、维护成本相对要高 - 新增或者删除时需要把所有索引都更新一遍；
+        3、最后在新增和删除的过程中的更新，时间复杂度也是O(log n)
+        ```
+9. Redis-MySQL双写一致性落地
